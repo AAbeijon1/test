@@ -21,6 +21,7 @@ from datetime import datetime
 import tensorflow as tf
 
 
+
 ruta_completa = "C:/Users/AAbeijon/Desktop/yolov5-object-tracking/detections.txt"  # Cambia esto a la ruta donde deseas guardar el archivo
 fechaloger = datetime.now()
 
@@ -35,15 +36,10 @@ import skimage
 from sort import *
 
 
-
-processed_ids = set()
-
-
 #-----------Object Blurring-------------------
 blurratio = 40
 
-def generate_unique_id():
-    return datetime.now().strftime('%Y%m%d%H%M%S%f')
+
 #.................. Tracker Functions .................
 '''Computer Color for every box and track'''
 palette = (2 ** 11 - 1, 2 ** 15 - 1, 2 ** 20 - 1)
@@ -100,7 +96,7 @@ def draw_boxes(img, bbox, identities=None, categories=None,
 
 @torch.no_grad()
 def detect(weights=ROOT / 'yolov5n.pt',
-           crop_save_path='./crops',
+           crop_save_path='C:/Users/AAbeijon/Desktop/yolov5-object-tracking/output',
         source=ROOT / 'yolov5/data/images', 
         data=ROOT / 'yolov5/data/coco128.yaml',  
         imgsz=(640, 640),conf_thres=0.25,iou_thres=0.45,  
@@ -113,8 +109,17 @@ def detect(weights=ROOT / 'yolov5n.pt',
         hide_conf=False,half=False,dnn=False,display_labels=False,
         blur_obj=False,color_box = False,):
     global saved_ids
-    save_img = not nosave and not source.endswith('.txt') 
-    
+    save_img = not nosave and not source.endswith('.txt')
+    dets_to_sort = np.empty((0,6))
+    print ("inicio") 
+    try:
+        with open("C:/Users/AAbeijon/Desktop/yolov5-object-tracking/last_id.txt", "r") as f:
+            content = f.read().strip()
+            last_id = int(float(content))
+    except (FileNotFoundError, ValueError):
+        print("Error al leer el archivo last_id.txt")
+        last_id = 0
+
     #.... Initialize SORT .... 
     sort_max_age = 5 
     sort_min_hits = 2
@@ -159,8 +164,8 @@ def detect(weights=ROOT / 'yolov5n.pt',
     dt, seen = [0.0, 0.0, 0.0], 0
     
     for path, im, im0s, vid_cap, s in dataset:
+        id_save_count = {}
         fechaloger = datetime.now()
-        
         t1 = time_sync()
         im = torch.from_numpy(im).to(device)
         im = im.half() if half else im.float()  # uint8 to fp16/32
@@ -208,26 +213,25 @@ def detect(weights=ROOT / 'yolov5n.pt',
                 #class_name = names[int(cls)]
                 current_date = datetime.now().strftime('%Y%m%d_%H%M%S')
                 clases_deseadas = ["person", "bicycle", "car", "motorcycle", "bus"]
+                tracked_dets = []
+
+                # Luego, dentro del bucle de detección, actualiza tracked_dets con el resultado de sort_tracker.update():
+                tracked_dets = sort_tracker.update(dets_to_sort)
                 for i, (*xyxy, conf, cls) in enumerate(reversed(det)):
                     identities = None
-                    id = int(identities[i]) if identities is not None and i < len(identities) else 0
-                    
+                    id = int(tracked_dets[i][8]) if i < len(tracked_dets) else 0  # Asegurarse de que no se exceda el índice
+
                     if cls is not None:
                         class_name = names[int(cls)]
-                    crop_obj = None
-                    if save_crop and id not in saved_ids:
-                        class_name = names[int(cls)]
+                    if save_crop and class_name in clases_deseadas:
+                        crop_obj = im0[int(xyxy[1]):int(xyxy[3]), int(xyxy[0]):int(xyxy[2])]
+                        class_folder_path = os.path.join(opt.crop_save_path, class_name)
+                        if not os.path.exists(class_folder_path):
+                            os.makedirs(class_folder_path)
                         
-                        if class_name in clases_deseadas:
-                            crop_obj = im0[int(xyxy[1]):int(xyxy[3]), int(xyxy[0]):int(xyxy[2])]
-                            class_folder_path = os.path.join(opt.crop_save_path, class_name)
-                            
-                            if not os.path.exists(class_folder_path):
-                                os.makedirs(class_folder_path)
-                            
-                            crop_save_path = os.path.join(class_folder_path, f"crop_{current_date}_{id}.jpg")
-                            cv2.imwrite(crop_save_path, crop_obj)
-                            saved_ids.add(id)  # Add the ID to the set of saved IDs
+                        # Usa el ID en el nombre del archivo
+                        crop_save_path = os.path.join(class_folder_path, f"{id}.jpg")
+                        cv2.imwrite(crop_save_path, crop_obj)
 
 
 
@@ -246,17 +250,9 @@ def detect(weights=ROOT / 'yolov5n.pt',
                     dets_to_sort = np.vstack((dets_to_sort, 
                                               np.array([x1, y1, x2, y2, 
                                                         conf, detclass])))
-                
-
+                 
                 # Run SORT
                 tracked_dets = sort_tracker.update(dets_to_sort)
-
-                for det in tracked_dets:
-                    unique_id = generate_unique_id()
-                    det[8] = unique_id
-                    if opt.save_crop and unique_id not in processed_ids:
-                        save_one_box(xyxy, im0, file=save_dir / 'crops' / f"{unique_id}.jpg", BGR=True)
-                        processed_ids.add(unique_id)
                 tracks =sort_tracker.getTrackers()
                 
 
@@ -274,7 +270,9 @@ def detect(weights=ROOT / 'yolov5n.pt',
                                 (int(track.centroidarr[i+1][0]),int(track.centroidarr[i+1][1])),
                                 (124, 252, 0), thickness=3) for i,_ in  enumerate(track.centroidarr) 
                                 if i < len(track.centroidarr)-1 ] 
-                
+                # Extract the highest ID from tracked_dets
+                max_id_in_frame = max([d[8] for d in tracked_dets]) if len(tracked_dets) > 0 else 0
+                last_id = max(last_id, max_id_in_frame)
                 # draw boxes for visualization
                 if len(tracked_dets)>0:
                     bbox_xyxy = tracked_dets[:,:4]
@@ -407,21 +405,23 @@ def detect(weights=ROOT / 'yolov5n.pt',
                             save_path += '.mp4'
                         vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
                     vid_writer.write(im0)
-                    time.sleep(3) # <---- Tiempo de procesamiento
         print("Frame Processing!")
+        print(f"Guardando last_id: {last_id}")
+        with open("C:/Users/AAbeijon/Desktop/yolov5-object-tracking/last_id.txt", "w") as f:
+            f.write(str(int(last_id)))
+
     print("Video Exported Success")
-    
+
     if update:
         strip_optimizer(weights)
     
     if vid_cap:
         vid_cap.release()
-    
 
 
 def parse_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--crop-save-path', type=str, default='./crops', help='path to save cropped images')
+    parser.add_argument('--crop-save-path', type=str, default='C:/Users/AAbeijon/Desktop/yolov5-object-tracking/output', help='path to save cropped images')
     parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolov5s.pt', help='model path(s)')
     parser.add_argument('--source', type=str, default=ROOT / 'data/images', help='file/dir/URL/glob, 0 for webcam')
     parser.add_argument('--data', type=str, default=ROOT / 'data/coco128.yaml', help='(optional) dataset.yaml path')
